@@ -1,0 +1,11 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+app/build/
+core/out/
+core/obj/
+hubcore/cfg_*.json
+hubcore/node_modules/
+build/
+__pycache__/
