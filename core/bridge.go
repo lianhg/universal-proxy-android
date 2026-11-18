@@ -9,7 +9,7 @@ import (
 
 	"github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/adapter"
-	_ "github.com/sagernet/sing-box/include" // 注册全部协议/传输
+	"github.com/sagernet/sing-box/include"
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/json"
 	"github.com/sagernet/sing/service"
@@ -26,6 +26,14 @@ var (
 	cur *instance
 )
 
+// baseContext 注册全部协议/传输/DNS 服务注册表。
+// 关键：配置解码（UnmarshalExtendedContext）也必须在带注册表的 ctx 下进行，
+// 否则 dns.servers 的 type（udp/https 等）会报 "missing DNS transport options registry"。
+func baseContext(fd int) context.Context {
+	ctx := include.Context(context.Background())
+	return service.ContextWith[adapter.PlatformInterface](ctx, &tunbridge.Bridge{FD: fd})
+}
+
 // Start 用 sing-box JSON 配置 + VpnService 的 tun fd 启动内核。
 func Start(configJSON string, tunFd int32) error {
 	mu.Lock()
@@ -33,11 +41,11 @@ func Start(configJSON string, tunFd int32) error {
 	if cur != nil {
 		return fmt.Errorf("already running; call Stop first")
 	}
-	options, err := json.UnmarshalExtendedContext[option.Options](context.Background(), []byte(configJSON))
+	ctx := baseContext(int(tunFd))
+	options, err := json.UnmarshalExtendedContext[option.Options](ctx, []byte(configJSON))
 	if err != nil {
 		return fmt.Errorf("decode config: %w", err)
 	}
-	ctx := service.ContextWith[adapter.PlatformInterface](context.Background(), &tunbridge.Bridge{FD: int(tunFd)})
 	b, err := box.New(box.Options{Context: ctx, Options: options})
 	if err != nil {
 		return fmt.Errorf("create box: %w", err)
@@ -75,7 +83,7 @@ func IsRunning() bool {
 
 // CheckConfig 校验配置（不启动），返回错误串，空串表示通过。
 func CheckConfig(configJSON string) string {
-	_, err := json.UnmarshalExtendedContext[option.Options](context.Background(), []byte(configJSON))
+	_, err := json.UnmarshalExtendedContext[option.Options](baseContext(0), []byte(configJSON))
 	if err != nil {
 		return err.Error()
 	}

@@ -11,8 +11,8 @@ android {
         applicationId = "cn.agensai.universalproxy"
         minSdk = 24
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0-android"
+        versionCode = 3
+        versionName = "0.3.0-android"
     }
 
     buildTypes {

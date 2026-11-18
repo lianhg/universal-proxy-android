@@ -10,7 +10,8 @@ const PRIVATE_CIDR = ['0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
  * 协议字段映射 100% 走桌面端同一份 buildSingBoxOutbound（经 55+ 测试）。
  * mode: 'global' 全部走代理；'bypass-private' 仅局域网直连。
  */
-function buildSingBoxConfig(nodes: UnifiedNode[], selectedId: string, mode: string): string {
+function buildSingBoxConfig(nodesIn: UnifiedNode[] | string, selectedId: string, mode: string): string {
+  const nodes: UnifiedNode[] = typeof nodesIn === 'string' ? JSON.parse(nodesIn) : nodesIn;
   const selected = nodes.find(n => n.id === selectedId) ?? nodes[0];
   if (!selected) return JSON.stringify({ error: '没有可用节点' });
   const gen = generateKernelConfig([selected], 'sing-box');
@@ -26,8 +27,10 @@ function buildSingBoxConfig(nodes: UnifiedNode[], selectedId: string, mode: stri
   const config = {
     log: { level: 'info', timestamp: true },
     dns: {
+      // 只留一个走代理的远程 DNS：内嵌 tun 模式下 direct outbound 是空配置，
+      // sing-box 会拒绝 "detour to an empty direct outbound"；局域网直连由 route 规则处理，
+      // 其目标都是 IP 字面量，不需要本地 DNS 服务器。
       servers: [
-        { tag: 'dns-local', type: 'udp', server: '223.5.5.5', detour: 'direct' },
         { tag: 'dns-remote', type: 'https', server: 'dns.google', detour: proxyOut.tag },
       ],
       final: 'dns-remote',
@@ -41,10 +44,10 @@ function buildSingBoxConfig(nodes: UnifiedNode[], selectedId: string, mode: stri
       },
     ],
     outbounds: [proxyOut, { type: 'direct', tag: 'direct' }, { type: 'block', tag: 'block' }],
-    route: { rules: [{ action: 'sniff' }, { protocol: ['dns'], action: 'hijack-dns' }, ...rules], final: proxyOut.tag, auto_detect_interface: true, default_domain_resolver: 'dns-remote' },
+    route: { rules: [{ action: 'sniff' }, { protocol: ['dns'], action: 'hijack-dns' }, ...rules], final: proxyOut.tag, auto_detect_interface: false, default_domain_resolver: 'dns-remote' },
+    // 不写 cache_file：内嵌模式工作目录不可写（安卓进程 CWD=/），选节点缓存非必需
     experimental: {
       clash_api: { external_controller: '127.0.0.1:21811', external_ui: '', secret: '' },
-      cache_file: { enabled: true },
     },
   };
   return JSON.stringify({ config: JSON.stringify(config), nodeName: selected.name, protocol: selected.protocol });
@@ -89,12 +92,12 @@ function resetTelemetry(): string {
 }
 
 /** 首页卡片聚合：一次返回全部渲染所需数据（纯展示计算，全部走桌面同一份函数） */
-function buildDashboardCards(inputJson: string): string {
-  const inp = JSON.parse(inputJson) as {
+function buildDashboardCards(inputIn: string | any): string {
+  const inp: {
     connected: boolean; nodeName: string; listenPort: number | null;
     runningSeconds: number; nodesJson: string; selectedId: string;
     diagnosis?: any;
-  };
+  } = typeof inputIn === 'string' ? JSON.parse(inputIn) : inputIn;
   const t = snapshot;
   const status = describeMonitorStatus({
     connected: inp.connected, runtimeState: inp.connected ? 'running' : 'idle',

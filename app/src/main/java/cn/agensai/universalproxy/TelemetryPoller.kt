@@ -1,5 +1,6 @@
 package cn.agensai.universalproxy
 
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -17,6 +18,7 @@ import java.net.URL
  * 失败经 ingestPollFailure 归零并写明原因，绝不沿用旧帧。只访问 127.0.0.1 本机控制端口。
  */
 object TelemetryPoller {
+    private const val TAG = "UPCPoll"
     private const val BASE = "http://127.0.0.1:21811"
     private var job: Job? = null
     private var version = ""
@@ -36,6 +38,7 @@ object TelemetryPoller {
                     if (tick % 30 == 0) version = parseVersion(get("/version"))
                     HubCore.call("ingestConnections", JSONObject.quote(conns) + "," + JSONObject.quote(version))
                 } catch (e: Exception) {
+                    Log.w(TAG, "poll fail: " + e.message)
                     HubCore.call("ingestPollFailure", JSONObject.quote(e.message ?: "无法连接控制端口"))
                 }
                 try {

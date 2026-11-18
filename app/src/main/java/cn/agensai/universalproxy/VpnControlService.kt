@@ -1,6 +1,7 @@
 package cn.agensai.universalproxy
 
 import android.app.Notification
+import android.util.Log
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
@@ -19,6 +20,7 @@ import bridge.Bridge
 class VpnControlService : VpnService() {
 
     companion object {
+        private const val TAG = "VpnSvc"
         const val ACTION_START = "cn.agensai.universalproxy.START"
         const val ACTION_STOP = "cn.agensai.universalproxy.STOP"
         const val EXTRA_CONFIG_JSON = "config_json"
@@ -33,6 +35,8 @@ class VpnControlService : VpnService() {
     }
 
     private var pfd: ParcelFileDescriptor? = null
+
+    override fun onCreate() { super.onCreate() }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
@@ -53,7 +57,7 @@ class VpnControlService : VpnService() {
                             .setBlocking(true)
                             .setMtu(9000)
                             .addDisallowedApplication(packageName) // 永不接管自己
-                            .establish() ?: error("VPN 建立被拒绝（可能已有其他 VPN 在运行）")
+                            .establish() ?: run { Log.e(TAG, "establish returned null"); error("VPN 建立被拒绝（可能已有其他 VPN 在运行）") }
 
                         // 配置 JSON 内容 + tun fd 交给内嵌 sing-box（Go error → Java Exception）
                         Bridge.start(configJson, pfd!!.fd)
@@ -64,6 +68,7 @@ class VpnControlService : VpnService() {
                         statusText = "已连接 · " + nodeLabel
                         updateNotification()
                     } catch (e: Throwable) {
+                        Log.e(TAG, "connect failed", e)
                         statusText = "连接失败: " + (e.message ?: e.javaClass.simpleName)
                         running = false
                         startedAtMs = 0L
@@ -81,6 +86,7 @@ class VpnControlService : VpnService() {
     }
 
     private fun stopAll() {
+        Log.i(TAG, "stopAll")
         TelemetryPoller.stop()
         try { Bridge.stop() } catch (_: Throwable) {}
         try { pfd?.close() } catch (_: Throwable) {}

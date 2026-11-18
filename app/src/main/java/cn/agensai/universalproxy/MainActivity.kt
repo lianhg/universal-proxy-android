@@ -1,6 +1,7 @@
 package cn.agensai.universalproxy
 
 import android.content.Intent
+import android.util.Log
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -23,6 +24,8 @@ import org.json.JSONObject
 
 @OptIn(ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
+
+    companion object { private const val TAG = "UPCMain" }
 
     private lateinit var store: NodeStore
     private var pendingStart: (() -> Unit)? = null
@@ -178,7 +181,8 @@ class MainActivity : ComponentActivity() {
         busy = true
         lifecycleScope.launch {
             try {
-                val out = JSONObject(HubCore.buildSingBoxConfig(nodes.toString(), target.optString("id"), store.mode()))
+                val raw = HubCore.buildSingBoxConfig(nodes.toString(), target.optString("id"), store.mode())
+                val out = JSONObject(raw)
                 if (out.has("error")) { status = "配置生成失败: " + out.getString("error"); return@launch }
                 val configJson = out.getString("config")
                 val nodeName = out.optString("nodeName")
@@ -190,6 +194,7 @@ class MainActivity : ComponentActivity() {
                 }
                 startVpn(configJson, nodeName)
             } catch (e: Exception) {
+                Log.e(TAG, "connect failed", e)
                 status = "连接失败: " + (e.message ?: e.javaClass.simpleName)
             } finally { busy = false }
         }
