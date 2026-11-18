@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -35,69 +36,107 @@ class MainActivity : ComponentActivity() {
     private var nodes by mutableStateOf(JSONArray())
     private var importText by mutableStateOf("")
     private var busy by mutableStateOf(false)
+    private var mode by mutableStateOf("bypass-private")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = NodeStore(this)
         HubCore.init(this)
         nodes = store.nodes()
+        mode = store.mode()
         status = if (VpnControlService.running) VpnControlService.statusText else "未连接"
+
+        // 卡片数据输入：连接状态 / 节点名 / 运行秒数 / 节点列表 / 选中项（全部真实值）
+        TelemetryPoller.inputProvider = {
+            val secs = if (VpnControlService.running && VpnControlService.startedAtMs > 0)
+                (System.currentTimeMillis() - VpnControlService.startedAtMs) / 1000 else 0
+            JSONObject()
+                .put("connected", VpnControlService.running)
+                .put("nodeName", VpnControlService.nodeNameOrEmpty())
+                .put("listenPort", JSONObject.NULL)
+                .put("runningSeconds", secs)
+                .put("nodesJson", store.nodes().toString())
+                .put("selectedId", store.selected())
+        }
+
         setContent {
             MaterialTheme {
+                val cards by TelemetryPoller.cards.collectAsState()
                 Scaffold(topBar = { TopAppBar(title = { Text("万能代理客户端 · 安卓") }) }) { pad ->
-                    Column(Modifier.padding(pad).padding(16.dp).verticalScroll(rememberScrollState())) {
+                    Column(Modifier.padding(pad).padding(12.dp).verticalScroll(rememberScrollState())) {
+                        // 卡片组（桌面同款数据链路）
+                        DashboardCards(
+                            cards = cards,
+                            connected = VpnControlService.running,
+                            onConnect = { connectSelected() },
+                            onDisconnect = { disconnect() },
+                            onSelectNode = { id -> store.setSelected(id); nodes = store.nodes() },
+                        )
+                        Spacer(Modifier.height(12.dp))
+
+                        // 状态与分流模式
                         Card(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(16.dp)) {
+                            Column(Modifier.padding(14.dp)) {
                                 Text(if (VpnControlService.running) "● " + status else "○ " + status)
-                                Spacer(Modifier.height(8.dp))
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Button(onClick = { connectSelected() }, enabled = !busy && nodes.length() > 0) { Text("连接") }
-                                    OutlinedButton(onClick = { disconnect() }, enabled = VpnControlService.running) { Text("断开") }
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text("分流：", fontSize = 13.sp)
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        listOf("bypass-private" to "局域网直连", "global" to "全局代理").forEach { (key, label) ->
+                                            if (mode == key) Button(onClick = {}, enabled = false) { Text(label, fontSize = 11.sp) }
+                                            else OutlinedButton(onClick = { mode = key; store.setMode(key) }) { Text(label, fontSize = 11.sp) }
+                                        }
+                                    }
                                 }
                             }
                         }
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(12.dp))
 
+                        // 导入
                         Card(Modifier.fillMaxWidth()) {
-                            Column(Modifier.padding(16.dp)) {
+                            Column(Modifier.padding(14.dp)) {
                                 Text("导入分享链接 / 订阅内容", style = MaterialTheme.typography.titleMedium)
                                 OutlinedTextField(
                                     value = importText, onValueChange = { importText = it },
                                     label = { Text("vmess:// vless:// trojan:// 或粘贴订阅正文") },
-                                    modifier = Modifier.fillMaxWidth().height(120.dp)
+                                    modifier = Modifier.fillMaxWidth().height(110.dp)
                                 )
                                 Spacer(Modifier.height(8.dp))
                                 Button(onClick = { doImport() }, enabled = !busy) { Text("解析并导入") }
                             }
                         }
-                        Spacer(Modifier.height(16.dp))
+                        Spacer(Modifier.height(12.dp))
 
-                        Text("节点（" + nodes.length() + "）", style = MaterialTheme.typography.titleMedium)
+                        // 节点列表（精简版：卡片组里已有选择行，这里保留删除入口）
+                        Text("管理（" + nodes.length() + "）", style = MaterialTheme.typography.titleMedium)
                         for (i in 0 until nodes.length()) {
                             val n = nodes.optJSONObject(i) ?: continue
                             val sel = n.optString("id") == store.selected()
-                            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-                                Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text(n.optString("name"), style = MaterialTheme.typography.bodyLarge)
-                                        Text(n.optString("protocol") + " · " + n.optString("server") + ":" + n.optInt("port") + " · 内核:" + n.optString("kernel"),
-                                            style = MaterialTheme.typography.bodySmall)
-                                    }
-                                    if (sel) Text("✓ 已选") else TextButton(onClick = { store.setSelected(n.optString("id")) }) { Text("选择") }
+                            Card(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                                Row(Modifier.padding(horizontal = 12.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text((if (sel) "✓ " else "") + n.optString("name"), Modifier.weight(1f), fontSize = 13.sp)
+                                    TextButton(onClick = {
+                                        val arr = JSONArray()
+                                        for (j in 0 until nodes.length()) if (j != i) nodes.optJSONObject(j)?.let(arr::put)
+                                        store.saveNodes(arr); nodes = store.nodes()
+                                    }) { Text("删除", fontSize = 11.sp, color = MaterialTheme.colorScheme.error) }
                                 }
                             }
                         }
-                        if (nodes.length() == 0) Text("还没有节点。粘贴链接或订阅正文后点「解析并导入」。", style = MaterialTheme.typography.bodySmall)
+                        if (nodes.length() == 0) Text("还没有节点。粘贴链接或订阅正文后点「解析并导入」。", fontSize = 12.sp)
                     }
                 }
             }
         }
     }
 
+
     override fun onResume() {
         super.onResume()
         status = if (VpnControlService.running) VpnControlService.statusText else "未连接"
         nodes = store.nodes()
+        mode = store.mode()
+        // 打开界面时若内核在跑但轮询没在（进程被杀重启等），补拉一次
+        if (VpnControlService.running) TelemetryPoller.start(TelemetryScope.scope)
     }
 
     private fun doImport() {
@@ -110,7 +149,6 @@ class MainActivity : ComponentActivity() {
                 val found = rep.optJSONArray("nodes") ?: JSONArray()
                 val requiresFetch = rep.optJSONObject("requiresFetch")
                 if (found.length() == 0 && requiresFetch != null) {
-                    // 订阅地址：用户显式点击才联网拉取（与桌面端同规则）
                     status = "识别为订阅地址，拉取中…"
                     val url = requiresFetch.optString("url")
                     val body = withContext(Dispatchers.IO) { SubscriptionFetcher.fetch(url) }
@@ -142,7 +180,6 @@ class MainActivity : ComponentActivity() {
             try {
                 val out = JSONObject(HubCore.buildSingBoxConfig(nodes.toString(), target.optString("id"), store.mode()))
                 if (out.has("error")) { status = "配置生成失败: " + out.getString("error"); return@launch }
-                if (out.optString("protocol") != "sing-box-ready") { /* keep simple */ }
                 val configJson = out.getString("config")
                 val nodeName = out.optString("nodeName")
                 val prep = android.net.VpnService.prepare(this@MainActivity)
@@ -168,7 +205,7 @@ class MainActivity : ComponentActivity() {
         status = "连接中 · " + nodeName
     }
 
-    private fun configFileGuard(json: String): String = json // 直传；服务内使用
+    private fun configFileGuard(json: String): String = json
 
     private fun disconnect() {
         startService(Intent(this, VpnControlService::class.java).apply { action = VpnControlService.ACTION_STOP })

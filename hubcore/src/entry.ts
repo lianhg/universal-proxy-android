@@ -42,8 +42,107 @@ function buildSingBoxConfig(nodes: UnifiedNode[], selectedId: string, mode: stri
     ],
     outbounds: [proxyOut, { type: 'direct', tag: 'direct' }, { type: 'block', tag: 'block' }],
     route: { rules: [{ action: 'sniff' }, { protocol: ['dns'], action: 'hijack-dns' }, ...rules], final: proxyOut.tag, auto_detect_interface: true, default_domain_resolver: 'dns-remote' },
+    experimental: {
+      clash_api: { external_controller: '127.0.0.1:21811', external_ui: '', secret: '' },
+      cache_file: { enabled: true },
+    },
   };
   return JSON.stringify({ config: JSON.stringify(config), nodeName: selected.name, protocol: selected.protocol });
+}
+
+
+/* ───────────────────── 卡片数据层：复用桌面 telemetry.ts / regions.ts 同一份代码 ───────────────────── */
+
+import {
+  emptyTelemetry, applySample, parseClashConnections, aggregateConnections, outboundRatio,
+  formatBytes, formatSpeed, describeMonitorStatus, formatSampledAgo,
+  type TelemetrySnapshot, type ConnectionsPayload,
+} from './telemetry.js';
+import { regionOf } from './regions.js';
+
+/** 上一次采样快照（模块内状态；每次成功/失败都重建，不沿用旧帧冒充实时） */
+let snapshot: TelemetrySnapshot = emptyTelemetry('sing-box', '内核未连接，等待用户点击「开始连接」');
+
+/** Kotlin 每秒轮询 clash_api 后把 /connections 原始 JSON 喂进来；返回归一化快照 */
+function ingestConnections(rawJson: string, versionStr: string): string {
+  try {
+    const payload: ConnectionsPayload = parseClashConnections(JSON.parse(rawJson));
+    snapshot = applySample(snapshot, payload, Date.now(), versionStr);
+    return JSON.stringify({ ok: true, snapshot });
+  } catch (e: any) {
+    // 失败：速率归零 + 具体原因，绝不返回上一帧
+    snapshot = { ...emptyTelemetry('sing-box', '采样失败：' + String(e?.message ?? e)), state: 'error', error: String(e?.message ?? e) } as TelemetrySnapshot;
+    return JSON.stringify({ ok: false, error: String(e?.message ?? e), snapshot });
+  }
+}
+
+/** Kotlin 轮询层自身失败（连不上控制端口等）时也把原因喂进来，界面不沿用旧帧 */
+function ingestPollFailure(reason: string): string {
+  snapshot = { ...emptyTelemetry('sing-box', '轮询失败：' + reason), state: 'error', error: reason } as TelemetrySnapshot;
+  return JSON.stringify({ ok: false, error: reason, snapshot });
+}
+
+/** 重置（断开时调用） */
+function resetTelemetry(): string {
+  snapshot = emptyTelemetry('sing-box', '内核未连接，等待用户点击「开始连接」');
+  return JSON.stringify({ ok: true });
+}
+
+/** 首页卡片聚合：一次返回全部渲染所需数据（纯展示计算，全部走桌面同一份函数） */
+function buildDashboardCards(inputJson: string): string {
+  const inp = JSON.parse(inputJson) as {
+    connected: boolean; nodeName: string; listenPort: number | null;
+    runningSeconds: number; nodesJson: string; selectedId: string;
+    diagnosis?: any;
+  };
+  const t = snapshot;
+  const status = describeMonitorStatus({
+    connected: inp.connected, runtimeState: inp.connected ? 'running' : 'idle',
+    runtimeMessage: '', kernel: 'sing-box', nodeName: inp.nodeName,
+    listenPort: inp.listenPort, telemetry: t, diagnosis: inp.diagnosis ?? null, now: Date.now(),
+  });
+  const ratio = outboundRatio(t.connections);
+  const byProcess = aggregateConnections(t.connections, 'chain', 6);
+  // 节点地区分组（桌面 regions.ts 同一规则：只认节点名真实关键词，不猜）
+  let groups: Record<string, number> = {};
+  let nodeRows: any[] = [];
+  try {
+    const nodes = JSON.parse(inp.nodesJson || '[]');
+    for (const n of nodes) {
+      const g = regionOf(n); // 桌面同一规则：只认节点名真实关键词，认不出归「其他地区」
+      groups[g] = (groups[g] || 0) + 1;
+      nodeRows.push({ id: n.id, name: n.name, protocol: n.protocol, server: n.server, port: n.port, region: g, selected: n.id === inp.selectedId });
+    }
+  } catch { /* 节点列表解析失败不影响其余卡片 */ }
+  const h = Math.floor(inp.runningSeconds / 3600), m = Math.floor((inp.runningSeconds % 3600) / 60);
+  return JSON.stringify({
+    heroTop: {
+      connected: inp.connected,
+      connectedText: inp.connected ? '已连接' : '未连接',
+      downSpeed: formatSpeed(t.downSpeed), upSpeed: formatSpeed(t.upSpeed),
+      runtimeText: inp.connected ? h + '小时' + m + '分钟' : '—',
+    },
+    power: { running: inp.connected, nodeName: inp.nodeName || '未选择节点' },
+    monitor: {
+      connection: status.connection, sampling: status.sampling,
+      source: status.source, nodeCheck: status.nodeCheck,
+      sampledAgo: status.sampledAgo, connectionList: status.connectionList,
+      emptyTitle: status.emptyTitle, emptyDetail: status.emptyDetail,
+      // 桌面 telemetry.ts 的 advice 面向桌面 UI；安卓按本端可执行动作改写（保持"说人话+给操作"语义）
+      advice: status.advice.map((a: string) =>
+        a.includes('刷新数据') ? '下拉本页或等下一秒自动重采样'
+        : a.includes('运行日志') ? '下拉本页稍候重试，仍失败请断开重连'
+        : a),
+    },
+    traffic: {
+      downTotal: formatBytes(t.downloadTotal), upTotal: formatBytes(t.uploadTotal),
+      active: t.activeConnections, sampledAgo: formatSampledAgo(t.ts, Date.now()),
+      ratio, history: t.history.map(p => ({ up: p.up, down: p.down })),
+    },
+    ranking: byProcess,                   // 出口链路排行（chain 维度）
+    nodeGroups: groups, nodeRows,
+    emptyReason: inp.connected ? '' : (t.reason || '内核未运行'),
+  });
 }
 
 ;(globalThis as any).__HUB__ = {
@@ -51,5 +150,6 @@ function buildSingBoxConfig(nodes: UnifiedNode[], selectedId: string, mode: stri
   importQrPayload: (text: string, source: string, opts?: any) => importQrPayload(text, source, opts ?? {}),
   protocolCoverage: () => protocolCoverage(),
   buildSingBoxConfig,
+  ingestConnections, ingestPollFailure, resetTelemetry, buildDashboardCards,
 };
 export {};

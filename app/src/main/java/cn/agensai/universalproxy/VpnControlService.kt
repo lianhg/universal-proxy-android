@@ -26,6 +26,10 @@ class VpnControlService : VpnService() {
 
         @Volatile var running = false
         @Volatile var statusText = ""
+        @Volatile var startedAtMs = 0L
+        @Volatile var nodeName = ""
+
+        fun nodeNameOrEmpty(): String = if (running) nodeName else ""
     }
 
     private var pfd: ParcelFileDescriptor? = null
@@ -35,8 +39,8 @@ class VpnControlService : VpnService() {
             ACTION_STOP -> { stopAll(); return START_NOT_STICKY }
             ACTION_START -> {
                 val configJson = intent.getStringExtra(EXTRA_CONFIG_JSON) ?: return START_NOT_STICKY
-                val nodeName = intent.getStringExtra(EXTRA_NODE_NAME) ?: ""
-                startCompatNotification(nodeName)
+                val nodeLabel = intent.getStringExtra(EXTRA_NODE_NAME) ?: ""
+                startCompatNotification(nodeLabel)
                 Thread {
                     try {
                         pfd = Builder()
@@ -54,11 +58,15 @@ class VpnControlService : VpnService() {
                         // 配置 JSON 内容 + tun fd 交给内嵌 sing-box（Go error → Java Exception）
                         Bridge.start(configJson, pfd!!.fd)
                         running = true
-                        statusText = "已连接 · " + nodeName
+                        startedAtMs = System.currentTimeMillis()
+                        Companion.nodeName = nodeLabel
+                        TelemetryPoller.start(TelemetryScope.scope)
+                        statusText = "已连接 · " + nodeLabel
                         updateNotification()
                     } catch (e: Throwable) {
                         statusText = "连接失败: " + (e.message ?: e.javaClass.simpleName)
                         running = false
+                        startedAtMs = 0L
                         try { pfd?.close() } catch (_: Throwable) {}
                         pfd = null
                         updateNotification()
@@ -73,10 +81,13 @@ class VpnControlService : VpnService() {
     }
 
     private fun stopAll() {
+        TelemetryPoller.stop()
         try { Bridge.stop() } catch (_: Throwable) {}
         try { pfd?.close() } catch (_: Throwable) {}
         pfd = null
         running = false
+        startedAtMs = 0L
+        Companion.nodeName = ""
         statusText = "已断开"
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
